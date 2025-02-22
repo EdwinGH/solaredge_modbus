@@ -244,7 +244,9 @@ class SolarEdge:
                 time.sleep(0.1)
                 continue
 
-            result = self.client.read_holding_registers(address, length, slave=self.unit)
+            # Change in pymodbus v3.8.3
+            result = self.client.read_holding_registers(address, count=length, slave=self.unit)
+            # result = self.client.read_holding_registers(address, length, slave=self.unit)
             if not isinstance(result, ReadHoldingRegistersResponse):
                 continue
             if len(result.registers) != length:
