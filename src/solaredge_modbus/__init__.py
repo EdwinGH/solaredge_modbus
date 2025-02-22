@@ -6,8 +6,8 @@ from pymodbus.payload import BinaryPayloadBuilder
 from pymodbus.payload import BinaryPayloadDecoder
 from pymodbus.client import ModbusTcpClient
 from pymodbus.client import ModbusSerialClient
-from pymodbus.register_read_message import ReadHoldingRegistersResponse
-
+#from pymodbus.register_read_message import ReadHoldingRegistersResponse
+from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
 
 RETRIES = 3
 TIMEOUT = 1
