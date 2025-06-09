@@ -13,7 +13,7 @@ from pymodbus.client import ModbusSerialClient
 from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
 
 name = 'solaredge_modbus_TEST'
-DEBUG = True
+DEBUG = False
 
 RETRIES = 3
 TIMEOUT = 1
