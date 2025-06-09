@@ -1,6 +1,7 @@
 # solaredge_modbus
 
 solaredge_modbus is a python library that collects data from SolarEdge inverters over Modbus RTU or Modbus TCP.
+This version supports SolarEdge Meters and Batteries, and is updated for the latest pymodbus (without the Binary Payload Builders and Decoders)
 
 ## Installation
 
