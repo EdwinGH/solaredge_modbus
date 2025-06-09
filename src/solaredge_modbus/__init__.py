@@ -1,13 +1,19 @@
 import enum
 import time
 
+from importlib.metadata import version
+
 from pymodbus.constants import Endian
 from pymodbus.payload import BinaryPayloadBuilder
 from pymodbus.payload import BinaryPayloadDecoder
 from pymodbus.client import ModbusTcpClient
 from pymodbus.client import ModbusSerialClient
+
 #from pymodbus.register_read_message import ReadHoldingRegistersResponse
 from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
+
+name = 'solaredge_modbus_TEST'
+DEBUG = True
 
 RETRIES = 3
 TIMEOUT = 1
@@ -129,6 +135,13 @@ BATTERY_STATUS_MAP = [
     "Idle"
 ]
 
+EXPORT_CONTROL_MODE_MAP = {
+    0: "Disabled",
+    1: "Direct Export Limitation",
+    2: "Indirect Export Limitation",
+    3: "Production Limitation",
+}
+
 EXPORT_CONTROL_LIMIT_MAP = [
     "Total",
     "Per Phase"
@@ -141,6 +154,31 @@ REACTIVE_POWER_CONFIG_MAP = [
     "Q(U) + Q(P) Mode",
     "RRCR Mode"
 ]
+
+STOREDGE_CONTROL_MODE = {
+    0: "Disabled",
+    1: "Maximize Self Consumption",
+    2: "Time of Use",
+    3: "Backup Only",
+    4: "Remote Control",
+}
+
+STOREDGE_AC_CHARGE_POLICY = {
+    0: "Disabled",
+    1: "Always Allowed",
+    2: "Fixed Energy Limit",
+    3: "Percent of Production",
+}
+
+STOREDGE_CHARGE_DISCHARGE_MODE = {
+    0: "Off",
+    1: "Charge from excess PV power only",
+    2: "Charge from PV first",
+    3: "Charge from PV and AC",
+    4: "Maximize export",
+    5: "Discharge to match load",
+    7: "Maximize self consumption",
+}
 
 METER_REGISTER_OFFSETS = [
     0x0,
@@ -234,97 +272,93 @@ class SolarEdge:
         else:
             return f"<{self.__class__.__module__}.{self.__class__.__name__} object at {hex(id(self))}>"
 
-    def _read_holding_registers(self, address, length):
-        # Check if the register needs little endian
-        wordorder = Endian.LITTLE if address in self.little_endian_registers else self.wordorder
+# EZ Removed _read_holding_registers & _write_holding_register (folded into _read and _write)
 
+    def _encode_value(self, data, dtype, wordorder):
+        if(DEBUG): print("_encode_value() called with data %s dtype %s wordorder %s" % (data, dtype, wordorder))
+        if dtype == registerDataType.INT16:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.INT16, word_order=wordorder)
+        elif dtype == registerDataType.UINT16:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.UINT16, word_order=wordorder)
+        elif (dtype == registerDataType.FLOAT32 or
+              dtype == registerDataType.SEFLOAT):
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.FLOAT32, word_order=wordorder)
+        elif dtype == registerDataType.INT32:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.INT32, word_order=wordorder)
+        elif dtype == registerDataType.UINT32:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.UINT32, word_order=wordorder)
+        elif dtype == registerDataType.UINT64:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.UINT64, word_order=wordorder)
+        elif dtype == registerDataType.STRING:
+            data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.STRING, word_order=wordorder)
+        else:
+            if(DEBUG): print("_encode_value() raising exception as register type %s Not Implemented" % dtype)
+            raise NotImplementedError(dtype)
+
+        if(DEBUG): print("_encode_value() returning data %s" % data)
+        return data
+
+    def _decode_value(self, registers, length, dtype, vtype, wordorder):
+        if(DEBUG): print("_decode_value() called with register(s) %s length %d" % (registers, length))
+        if dtype == registerDataType.INT16:
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.INT16, word_order=wordorder)
+        elif dtype == registerDataType.INT32:
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.INT32, word_order=wordorder)
+        elif dtype == registerDataType.UINT16:
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.UINT16, word_order=wordorder)
+        elif (dtype == registerDataType.UINT32 or
+              dtype == registerDataType.ACC32):
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.UINT32, word_order=wordorder)
+        elif dtype == registerDataType.UINT64:
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.UINT64, word_order=wordorder)
+        elif (dtype == registerDataType.FLOAT32 or
+              dtype == registerDataType.SEFLOAT):
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.FLOAT32, word_order=wordorder)
+        elif dtype == registerDataType.STRING:
+            data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.STRING, word_order=wordorder)
+        else:
+            if(DEBUG): print("_decode_value() raising exception as register type %s Not Implemented" % dtype)
+            raise NotImplementedError(dtype)
+
+        if data == SUNSPEC_NOTIMPLEMENTED[dtype.name]:
+            if(DEBUG): print("_decode_value() returning False as register value Not Implemented")
+            return vtype(False)
+        
+        if(DEBUG): print("_decode_value() returning data %s (with dtype %s) as %s (vtype %s)" % (data, type(data), vtype(data), vtype))
+        return vtype(data)
+
+
+    def _read(self, value):
+        address, length, rtype, dtype, vtype, label, fmt, batch = value
+        if(DEBUG): print("solaredge_modbus _read() called with address %s (%s) and length %d" % (address, hex(address), length))
+
+        # Make sure we are still connected
         for i in range(self.retries):
             if not self.connected():
+                if(DEBUG): print("solaredge_modbus _read() checked disconnected; reconnecting (%d/%d)" % (i, self.retries))
                 self.connect()
                 time.sleep(0.1)
                 continue
 
-            # Change in pymodbus v3.8.3
-            result = self.client.read_holding_registers(address, count=length, slave=self.unit)
-            # result = self.client.read_holding_registers(address, length, slave=self.unit)
-            if not isinstance(result, ReadHoldingRegistersResponse):
-                continue
-            if len(result.registers) != length:
-                continue
+        # convert_from_registers (and this _decode_value) does not use the pymodbus constants for endianness...
+        if address in self.little_endian_registers or self.wordorder == Endian.LITTLE:
+          wordorder = 'little'
+        else:
+          wordorder = 'big'
+        if(DEBUG): print("solaredge_modbus _read() using address %s word order %s" % (hex(address), wordorder))
 
-            return BinaryPayloadDecoder.fromRegisters(result.registers, byteorder=Endian.BIG, wordorder=wordorder)
-
-        return None
-
-    def _write_holding_register(self, address, value, dtype):
-        # Determine byte order based on address
-        wordorder = Endian.LITTLE if address in self.little_endian_registers else self.wordorder
-
-        # Use dtype and wordorder to encode the value properly
-        encoded_value = self._encode_value(value, dtype, wordorder)
-        return self.client.write_registers(address=address, values=encoded_value, slave=self.unit)
-
-    def _encode_value(self, data, dtype, wordorder):
-        builder = BinaryPayloadBuilder(byteorder=Endian.BIG, wordorder=wordorder)
-
-        try:
-            if dtype == registerDataType.INT16:
-                builder.add_16bit_int(data)
-            elif dtype == registerDataType.UINT16:
-                builder.add_16bit_uint(data)
-            elif (dtype == registerDataType.FLOAT32 or
-                  dtype == registerDataType.SEFLOAT):
-                builder.add_32bit_float(data)
-            elif dtype == registerDataType.INT32:
-                builder.add_32bit_int(data)
-            elif dtype == registerDataType.UINT32:
-                builder.add_32bit_uint(data)
-            elif dtype == registerDataType.UINT64:
-                builder.add_64bit_uint(data)
-            elif dtype == registerDataType.STRING:
-                builder.add_string(data)
-            else:
-                raise NotImplementedError(dtype)
-        except NotImplementedError:
-            raise
-        return builder.to_registers()
-
-    def _decode_value(self, data, length, dtype, vtype):
-        try:
-            if dtype == registerDataType.INT16:
-                decoded = data.decode_16bit_int()
-            elif dtype == registerDataType.INT32:
-                decoded = data.decode_32bit_int()
-            elif dtype == registerDataType.UINT16:
-                decoded = data.decode_16bit_uint()
-            elif (dtype == registerDataType.UINT32 or
-                  dtype == registerDataType.ACC32):
-                decoded = data.decode_32bit_uint()
-            elif dtype == registerDataType.UINT64:
-                decoded = data.decode_64bit_uint()
-            elif (dtype == registerDataType.FLOAT32 or
-                  dtype == registerDataType.SEFLOAT):
-                decoded = data.decode_32bit_float()
-            elif dtype == registerDataType.STRING:
-                decoded = data.decode_string(length * 2).decode(encoding="utf-8", errors="ignore").replace("\x00", "").rstrip()
-            else:
-                raise NotImplementedError(dtype)
-            if decoded == SUNSPEC_NOTIMPLEMENTED[dtype.name]:
-                return vtype(False)
-            elif decoded != decoded:
-                return vtype(False)
-            else:
-                return vtype(decoded)
-        except NotImplementedError:
-            raise
-
-    def _read(self, value):
-        address, length, rtype, dtype, vtype, label, fmt, batch = value
         try:
             if rtype == registerType.INPUT:
-                return self._decode_value(self._read_input_registers(address, length), length, dtype, vtype)
+                # EZ: Cannot test, no INPUT registers in SolarEdge?!
+                if(DEBUG): print("solaredge_modbus _read() calling pymodbus mixin read_input_registers with address %s and length %d" % (address, length))
+                result = self._read_input_registers(address, length)
+                return self._decode_value(result.registers, length, dtype, vtype, wordorder)
+                
             elif rtype == registerType.HOLDING:
-                return self._decode_value(self._read_holding_registers(address, length), length, dtype, vtype)
+                if(DEBUG): print("solaredge_modbus _read() calling pymodbus read_holding_registers with address %s and length %d" % (address, length))
+                result = self.client.read_holding_registers(address, count=length, slave=self.unit)
+                if(DEBUG): print("solaredge_modbus _read() calling _decode_value with registers from result %s" % result)
+                return self._decode_value(result.registers, length, dtype, vtype, wordorder)
             else:
                 raise NotImplementedError(rtype)
         except NotImplementedError:
@@ -333,6 +367,7 @@ class SolarEdge:
             return False
 
     def _read_all(self, values, rtype):
+        if(DEBUG): print("solaredge_modbus _read_all() called with values %s" % values)
         addr_min = False
         addr_max = False
 
@@ -354,39 +389,84 @@ class SolarEdge:
         offset = addr_min
         length = addr_max - addr_min
 
+        # Make sure we are still connected
+        for i in range(self.retries):
+            if not self.connected():
+                if(DEBUG): print("solaredge_modbus _read_all() checked disconnected; reconnecting (%d/%d)" % (i, self.retries))
+                self.connect()
+                time.sleep(0.1)
+                continue
+
         try:
             if rtype == registerType.INPUT:
-                data = self._read_input_registers(offset, length)
+                result = self._read_input_registers(offset, length)
             elif rtype == registerType.HOLDING:
-                data = self._read_holding_registers(offset, length)
+                if(DEBUG): print("solaredge_modbus _read_all() calling pymodbus read_holding_registers with offet %d (%s) and length %d" % (offset, hex(offset), length))
+
+                result = self.client.read_holding_registers(offset, count=length, slave=self.unit)
+
+                if(DEBUG): print("client read_holding_registers() returned with result %s" % result)
+
             else:
                 raise NotImplementedError(rtype)
 
-            if not data:
+            if not result:
                 return results
 
             for k, v in values.items():
                 address, length, rtype, dtype, vtype, label, fmt, batch = v
+                if(DEBUG): print("solaredge_modbus _read_all() going over values: key %s, address %s length %d" % (k, address, length))
 
                 if address > offset:
                     skip_bytes = address - offset
                     offset += skip_bytes
-                    data.skip_bytes(skip_bytes * 2)
+#                    data.skip_bytes(skip_bytes * 2)
+                
+                # convert_from_registers does not use the pymodbus constants for endianness...
+                if address in self.little_endian_registers or self.wordorder == Endian.LITTLE:
+                  wordorder = 'little'
+                else:
+                  wordorder = 'big'
+                if(DEBUG): print("solaredge_modbus _read_all() using address %s word order %s" % (hex(address), wordorder))
 
-                results[k] = self._decode_value(data, length, dtype, vtype)
+                results[k] = self._decode_value(result.registers[offset-addr_min:(offset-addr_min+length)], length, dtype, vtype, wordorder)
                 offset += length
+                
         except NotImplementedError:
             raise
 
+        if(DEBUG): print("solaredge_modbus _read_all() returning results %s" % results)
         return results
 
     def _write(self, value, data):
         # Unpack value tuple to extract necessary information
         address, length, rtype, dtype, vtype, label, fmt, batch = value
+        if(DEBUG): print("solaredge_modbus _write() called with address %s (%s), data %s and length %d" % (address, hex(address), data, length))
+
+        # Make sure we are still connected
+        for i in range(self.retries):
+            if not self.connected():
+                if(DEBUG): print("solaredge_modbus _read() checked disconnected; reconnecting (%d/%d)" % (i, self.retries))
+                self.connect()
+                time.sleep(0.1)
+                continue
+
+        # convert_to_registers (and this _encode_value) does not use the pymodbus constants for endianness...
+        if address in self.little_endian_registers or self.wordorder == Endian.LITTLE:
+          wordorder = 'little'
+        else:
+          wordorder = 'big'
+        if(DEBUG): print("solaredge_modbus _write() using address %s word order %s" % (hex(address), wordorder))
+
         try:
             if rtype == registerType.HOLDING:
-                # Pass dtype to _write_holding_register
-                return self._write_holding_register(address, data, dtype)
+                # Use dtype and wordorder to encode the value properly
+                encoded_value = self._encode_value(data, dtype, wordorder)
+
+                if(DEBUG): print("solaredge_modbus _write() calling pymodbus write_holding_registers with address %s and values %s" % (address, encoded_value))
+                # EZ Should this be write_register or write_registers?
+                return self.client.write_registers(address=address, values=encoded_value, slave=self.unit)
+
             else:
                 raise NotImplementedError(rtype)
         except NotImplementedError:
@@ -414,6 +494,7 @@ class SolarEdge:
         return self._write(self.registers[key], data)
 
     def read_all(self, rtype=registerType.HOLDING):
+        if(DEBUG): print("solaredge_modbus read_all() called")
         registers = {k: v for k, v in self.registers.items() if (v[2] == rtype)}
         results = {}
 
@@ -423,6 +504,7 @@ class SolarEdge:
             if not register_batch:
                 break
 
+            if(DEBUG): print("solaredge_modbus read_all() calling _read_all with batch %d register_batch %s" % (batch, register_batch))
             results.update(self._read_all(register_batch, rtype))
 
         return results
@@ -438,15 +520,19 @@ class Inverter(SolarEdge):
 
         # A dictionary to hold registers that require different wordorder
         self.little_endian_registers = {
+# EZ fixed address from f105 (see below), and added as little endian due to value
+            0xf106,  # "reactive_power_response_time"
             0xf700,  # export_control_mode
             0xf701,  # export_control_limit_mode
             0xf702,  # export_control_site_limit
+# EZ fixed from int16 to int32 resulted in 65535 instead of 1, so assume it is little endian as well
+            0xf142,  # advanced_power_control_enable
             0xe004,  # storage_control_mode
             0xe005,  # storage_ac_charge_policy
             0xe006,  # storage_ac_charge_limit
             0xe008,  # storage_backup_reserved_setting
             0xe00a,  # storage_default_mode
-            0xe00B,  # rc_cmd_timeout
+            0xe00b,  # rc_cmd_timeout
             0xe00d,  # rc_cmd_mode
             0xe00e,  # rc_charge_limit
             0xe010   # rc_discharge_limit
@@ -517,21 +603,29 @@ class Inverter(SolarEdge):
             "commit_power_control_settings": (0xf100, 1, registerType.HOLDING, registerDataType.INT16, int, "Commit Power Control Settings", "", 4),
             "restore_power_control_default_settings": (0xf101, 1, registerType.HOLDING, registerDataType.INT16, int, "Restore Power Control Default Settings", "", 4),
 
-            "reactive_power_config": (0xf103, 2, registerType.HOLDING, registerDataType.INT32, int, "Reactive Power Config", REACTIVE_POWER_CONFIG_MAP, 4),
-            "reactive_power_response_time": (0xf105, 2, registerType.HOLDING, registerDataType.UINT32, int, "Reactive Power Response Time", "ms", 4),
+# EZ: According to Technical Note – Power Control Protocol for SolarEdge Inverters v1.3
+# (from https://www.photovoltaikforum.com/core/file-download/85275/ it is F104 & F106 instead of f103 and f105 (only even addresses!)... 
+#            "reactive_power_config": (0xf103, 2, registerType.HOLDING, registerDataType.INT32, int, "Reactive Power Config", REACTIVE_POWER_CONFIG_MAP, 4),
+#            "reactive_power_response_time": (0xf105, 2, registerType.HOLDING, registerDataType.UINT32, int, "Reactive Power Response Time", "ms", 4),
+            "reactive_power_config": (0xf104, 2, registerType.HOLDING, registerDataType.INT32, int, "Reactive Power Config", REACTIVE_POWER_CONFIG_MAP, 4),
+            "reactive_power_response_time": (0xf106, 2, registerType.HOLDING, registerDataType.UINT32, int, "Reactive Power Response Time", "ms", 4),
 
-            "advanced_power_control_enable": (0xf142, 2, registerType.HOLDING, registerDataType.UINT16, int, "Advanced Power Control Enable", "", 4),
+# EZ: According to Technical Note – Power Control Protocol for SolarEdge Inverters v1.3
+# (from https://www.photovoltaikforum.com/core/file-download/85275/ it is a INT32, not 16 
+#            "advanced_power_control_enable": (0xf142, 2, registerType.HOLDING, registerDataType.UINT16, int, "Advanced Power Control Enable", "", 4),
+            "advanced_power_control_enable": (0xf142, 2, registerType.HOLDING, registerDataType.UINT32, int, "Advanced Power Control Enable", "", 4),
 
             "export_control_mode": (0xf700, 1, registerType.HOLDING, registerDataType.UINT16, int, "Export Control Mode", "", 5),
             "export_control_limit_mode": (0xf701, 1, registerType.HOLDING, registerDataType.UINT16, int, "Export Control Limit Mode", EXPORT_CONTROL_LIMIT_MAP, 5),
             "export_control_site_limit": (0xf702, 2, registerType.HOLDING, registerDataType.FLOAT32, int, "Export Control Site Limit", "W", 5),
 
+# EZ: Not sure why moving from f7xx to e0xx addressing here; According to above same results
             "storage_control_mode": (0xe004, 1, registerType.HOLDING, registerDataType.UINT16, int, "Storage Control Mode", "", 6),
             "storage_ac_charge_policy": (0xe005, 1, registerType.HOLDING, registerDataType.UINT16, int, "Storage AC Charge Policy", "", 6),
-            "storage_ac_charge_limit": (0xe006, 2, registerType.HOLDING, registerDataType.FLOAT32, float, "Storage AC Charge Limit", "", 6),
+            "storage_ac_charge_limit": (0xe006, 2, registerType.HOLDING, registerDataType.FLOAT32, float, "Storage AC Charge Limit", "W", 6),
             "storage_backup_reserved_setting": (0xe008, 2, registerType.HOLDING, registerDataType.FLOAT32, float, "Storage Backup Reserved Setting", "%", 6),
             "storage_default_mode": (0xe00a, 1, registerType.HOLDING, registerDataType.UINT16, int, "Storage Charge/Discharge Default Mode", "", 6),
-            "rc_cmd_timeout": (0xe00B, 2, registerType.HOLDING, registerDataType.UINT32, int, "Remote Control Command Timeout", "s", 6),
+            "rc_cmd_timeout": (0xe00b, 2, registerType.HOLDING, registerDataType.UINT32, int, "Remote Control Command Timeout", "s", 6),
             "rc_cmd_mode": (0xe00d, 1, registerType.HOLDING, registerDataType.UINT16, int, "Remote Control Command Mode", "", 6),
             "rc_charge_limit": (0xe00e, 2, registerType.HOLDING, registerDataType.FLOAT32, float, "Remote Control Command Charge Limit", "W", 6),
             "rc_discharge_limit": (0xe010, 2, registerType.HOLDING, registerDataType.FLOAT32, float, "Remote Control Command Discharge Limit", "W", 6)
@@ -547,15 +641,18 @@ class Inverter(SolarEdge):
         self.battery_dids = [
             (0xe140, 1, registerType.HOLDING, registerDataType.UINT16, int, "", "", 1),
             (0xe240, 1, registerType.HOLDING, registerDataType.UINT16, int, "", "", 1)
+# EZ: Third battery does not work (yet?)
 #            (0xe340, 1, registerType.HOLDING, registerDataType.UINT16, int, "", "", 1)
         ]
 
     def meters(self):
+        if(DEBUG): print("Inverter.meters")
         meters = [self._read(v) for v in self.meter_dids]
 
         return {f"Meter{idx + 1}": Meter(offset=idx, parent=self) for idx, v in enumerate(meters) if v}
 
     def batteries(self):
+        if(DEBUG): print("Inverter.batteries")
         batteries = [self._read(v) for v in self.battery_dids]
 
         return {f"Battery{idx + 1}": Battery(offset=idx, parent=self) for idx, v in enumerate(batteries) if v != 255}
@@ -565,10 +662,16 @@ class Meter(SolarEdge):
     def __init__(self, offset=False, *args, **kwargs):
         self.model = f"Meter{offset + 1}"
         self.wordorder = Endian.BIG
+        if(DEBUG): print("Meter __init__ with model %s" % self.model)
 
         super().__init__(*args, **kwargs)
 
         self.offset = METER_REGISTER_OFFSETS[offset]
+        if(DEBUG): print("Meter __init__ with offset %d" % self.offset)
+
+        # A dictionary to hold registers that require different wordorder. None for the Meter?!
+        self.little_endian_registers = {}
+
         self.registers = {
             "c_manufacturer": (0x9cbb + self.offset, 16, registerType.HOLDING, registerDataType.STRING, str, "Manufacturer", "", 1),
             "c_model": (0x9ccb + self.offset, 16, registerType.HOLDING, registerDataType.STRING, str, "Model", "", 1),
@@ -661,15 +764,68 @@ class Meter(SolarEdge):
             "energy_reactive_scale": (0x9d64 + self.offset, 1, registerType.HOLDING, registerDataType.SCALE, int, "Energy (Reactive) Scale Factor", "", 3)
         }
 
-class Battery(SolarEdge):
-
-    def __init__(self, offset=False, *args, **kwargs):
-        self.model = f"Battery{offset + 1}"
+# Today this class is a duplication of Inverter registers; in future probably good to split Inverter from StorEdge
+# which is controlling the battery
+class StorEdge(SolarEdge):
+    
+    def __init__(self, *args, **kwargs):
+        self.model = "StorEdge"
         self.wordorder = Endian.LITTLE
 
         super().__init__(*args, **kwargs)
 
+        self.registers = {
+            "export_control_mode": (0xe000, 1, registerType.HOLDING, registerDataType.UINT16, int, "Export Control Mode", EXPORT_CONTROL_MODE_MAP, 1),
+            "export_control_limit_mode": (0xe001, 1, registerType.HOLDING, registerDataType.UINT16, int, "Export Control Limit Mode", EXPORT_CONTROL_LIMIT_MAP, 1),
+            "export_control_site_limit": (0xe002, 2, registerType.HOLDING, registerDataType.SEFLOAT, float, "Export Control Site Limit", "", 1),
+            
+            "storedge_control_mode": (0xe004, 1, registerType.HOLDING, registerDataType.UINT16, int, "StorEdge Control Mode", STOREDGE_CONTROL_MODE, 1),
+            "storedge_ac_charge_policy": (0xe005, 1, registerType.HOLDING, registerDataType.UINT16, int, "StorEdge AC Charge Policy", STOREDGE_AC_CHARGE_POLICY, 1),
+            "storedge_ac_charge_limit": (0xe006, 2, registerType.HOLDING, registerDataType.SEFLOAT, float, "StorEdge AC Charge Limit (kWh or %)", "", 1),
+            "storedge_backup_reserved": (0xe008, 2, registerType.HOLDING, registerDataType.SEFLOAT, float, "StorEdge Backup Reserved (%)", "", 1),
+
+            "storedge_remote_default_command_mode": (0xe00a, 1, registerType.HOLDING, registerDataType.UINT16, int, "StorEdge Default Charge Mode", STOREDGE_CHARGE_DISCHARGE_MODE, 1),
+            "storedge_remote_command_timeout": (0xe00b, 2, registerType.HOLDING, registerDataType.UINT32, int, "StorEdge Remote Command Timeout", "", 1),
+            "storedge_remote_command_mode": (0xe00d, 1, registerType.HOLDING, registerDataType.UINT16, int, "StorEdge Remote Command Mode", STOREDGE_CHARGE_DISCHARGE_MODE, 1),
+            "storedge_remote_charge_limit": (0xe00e, 2, registerType.HOLDING, registerDataType.SEFLOAT, float, "StorEdge Remote Command Charge Limit", "", 1),
+            "storedge_remote_discharge_limit": (0xe010, 2, registerType.HOLDING, registerDataType.SEFLOAT, float, "StorEdge Remote Command Discharge Limit", "", 1),
+        }
+
+class Battery(SolarEdge):
+
+    def __init__(self, offset=False, *args, **kwargs):
+        self.model = f"Battery{offset + 1}"
+        self.wordorder = Endian.BIG
+
+        if(DEBUG): print("Battery __init__ with model %s" % self.model)
+
+        super().__init__(*args, **kwargs)
+
         self.offset = BATTERY_REGISTER_OFFSETS[offset]
+        if(DEBUG): print("Battery __init__ with offset %d" % self.offset)
+
+        # A dictionary to hold registers that require different wordorder
+        self.little_endian_registers = {
+            0xe142 + self.offset, # rated_energy
+            0xe144 + self.offset, # maximum_charge_continuous_power
+            0xe146 + self.offset, # "maximum_discharge_continuous_power"
+            0xe148 + self.offset, # "maximum_charge_peak_power"
+            0xe14a + self.offset, # "maximum_discharge_peak_power"
+            0xe16c + self.offset, # "average_temperature"
+            0xe16e + self.offset, # "maximum_temperature"
+            0xe170 + self.offset, # "instantaneous_voltage"
+            0xe172 + self.offset, # "instantaneous_current"
+            0xe174 + self.offset, # "instantaneous_power"
+            0xe176 + self.offset, # "lifetime_export_energy_counter"
+            0xe17A + self.offset, # "lifetime_import_energy_counter"
+            0xe17e + self.offset, # "maximum_energy"
+            0xe180 + self.offset, # "available_energy"
+            0xe182 + self.offset, # "soh"
+            0xe184 + self.offset, # "soe"
+            0xe186 + self.offset, # "status"
+            0xe188 + self.offset  # "status_internal"
+        }
+
         self.registers = {
             "c_manufacturer": (0xe100 + self.offset, 16, registerType.HOLDING, registerDataType.STRING, str, "Manufacturer", "", 1),
             "c_model": (0xe110 + self.offset, 16, registerType.HOLDING, registerDataType.STRING, str, "Model", "", 1),
@@ -703,6 +859,10 @@ class Battery(SolarEdge):
             "status": (0xe186 + self.offset, 2, registerType.HOLDING, registerDataType.UINT32, int, "Status", BATTERY_STATUS_MAP, 2),
             "status_internal": (0xe188 + self.offset, 2, registerType.HOLDING, registerDataType.UINT32, int, "Internal Status", BATTERY_STATUS_MAP, 2),
 
-            "event_log": (0xe18a + self.offset, 2, registerType.HOLDING, registerDataType.UINT16, int, "Event Log", "", 2),
-            "event_log_internal": (0xe192 + self.offset, 2, registerType.HOLDING, registerDataType.UINT16, int, "Internal Event Log", "", 2),
+# EZ: According to Technical Note – Power Control Protocol for SolarEdge Inverters v1.3
+# (from https://www.photovoltaikforum.com/core/file-download/85275/ event log is array of last 8 errors; only getting last one here 
+#            "event_log": (0xe18a + self.offset, 2, registerType.HOLDING, registerDataType.UINT16, int, "Event Log", "", 2),
+#            "event_log_internal": (0xe192 + self.offset, 2, registerType.HOLDING, registerDataType.UINT16, int, "Internal Event Log", "", 2),
+            "event_log": (0xe18a + self.offset, 1, registerType.HOLDING, registerDataType.UINT16, int, "Event Log", "", 2),
+            "event_log_internal": (0xe192 + self.offset, 1, registerType.HOLDING, registerDataType.UINT16, int, "Internal Event Log", "", 2),
         }
