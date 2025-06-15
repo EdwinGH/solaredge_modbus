@@ -12,7 +12,7 @@ from pymodbus.client import ModbusSerialClient
 #from pymodbus.register_read_message import ReadHoldingRegistersResponse
 from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
 
-name = 'solaredge_modbus_TEST'
+name = 'solaredge_modbus'
 DEBUG = False
 
 RETRIES = 3
@@ -292,7 +292,7 @@ class SolarEdge:
         elif dtype == registerDataType.STRING:
             data = self.client.convert_to_registers(data, data_type=self.client.DATATYPE.STRING, word_order=wordorder)
         else:
-            if(DEBUG): print("_encode_value() raising exception as register type %s Not Implemented" % dtype)
+            print("_encode_value() raising exception as register type %s Not Implemented" % dtype)
             raise NotImplementedError(dtype)
 
         if(DEBUG): print("_encode_value() returning data %s" % data)
@@ -317,7 +317,7 @@ class SolarEdge:
         elif dtype == registerDataType.STRING:
             data = self.client.convert_from_registers(registers, data_type=self.client.DATATYPE.STRING, word_order=wordorder)
         else:
-            if(DEBUG): print("_decode_value() raising exception as register type %s Not Implemented" % dtype)
+            print("_decode_value() raising exception as register type %s Not Implemented" % dtype)
             raise NotImplementedError(dtype)
 
         if data == SUNSPEC_NOTIMPLEMENTED[dtype.name]:
